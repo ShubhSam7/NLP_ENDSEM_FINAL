@@ -1,0 +1,41 @@
+# Modern Requirements for NLP Market Sentiment Analysis
+# Compatible with Python 3.10+
+# Install with: pip install -r requirements_modern.txt
+
+# Core Web Framework
+streamlit>=1.30.0
+
+# Data Manipulation
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Visualization
+plotly>=5.18.0
+matplotlib>=3.7.0
+
+# NLP & ML
+transformers>=4.35.0
+torch>=2.0.0
+textblob>=0.17.1
+nltk>=3.8.1
+spacy>=3.7.0
+
+# Machine Learning
+scikit-learn>=1.3.0
+scipy>=1.11.0
+lightgbm>=4.1.0
+joblib>=1.3.0
+
+# HTTP Requests
+requests>=2.31.0
+
+# Financial Data
+yfinance>=0.2.30
+
+# Additional Utilities
+tqdm>=4.66.0
+python-dateutil>=2.8.2
+python-dotenv>=1.0.0
+
+# Sentiment Analysis
+vaderSentiment>=3.3.2

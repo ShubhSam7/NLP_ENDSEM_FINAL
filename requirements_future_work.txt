@@ -1,0 +1,41 @@
+# Requirements for NLP Market Sentiment Analysis - Future Work
+# Install with: pip install -r requirements_future_work.txt
+
+# Core Dependencies
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.10.0
+
+# Deep Learning
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Machine Learning
+scikit-learn>=1.3.0
+
+# Optimization
+cvxpy>=1.3.0
+
+# Visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.14.0
+kaleido>=0.2.1  # For static image export
+
+# Data Processing
+python-dateutil>=2.8.2
+
+# Optional but recommended
+yfinance>=0.2.18  # For fetching actual stock data
+pandas-datareader>=0.10.0  # Alternative data source
+ta-lib>=0.4.0  # Technical analysis indicators (requires C library)
+
+# For API integration
+requests>=2.31.0
+finnhub-python>=2.4.18  # Your current data source
+
+# Development
+jupyter>=1.0.0
+ipython>=8.12.0
+pytest>=7.3.0
+black>=23.3.0

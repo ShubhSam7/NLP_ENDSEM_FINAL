@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m spacy:*)",
+      "Bash(pip install:*)",
+      "Bash(streamlit run:*)",
+      "Bash(timeout:*)",
+      "Bash(ping:*)",
+      "Bash(nul)",
+      "Bash(python:*)",
+      "Bash(dir /b /a \"c:\\Users\\shubh\\Developer\\Paper\\NLP_market_sentiment_analysis\")"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

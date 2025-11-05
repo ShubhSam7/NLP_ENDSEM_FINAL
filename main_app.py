@@ -1,3 +1,10 @@
+# IMPORTANT: Load PyTorch BEFORE Streamlit to avoid DLL conflicts on Windows
+try:
+    import torch
+    _torch_available = True
+except:
+    _torch_available = False
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -12,7 +19,13 @@ import json
 from textblob import TextBlob
 from sklearn.linear_model import LinearRegression
 import warnings
+import os
+from dotenv import load_dotenv
+
 warnings.filterwarnings('ignore')
+
+# Load environment variables
+load_dotenv()
 
 st.set_page_config(
     page_title="FinLlama: Advanced Financial Sentiment Analysis",
@@ -69,26 +82,68 @@ st.markdown("""
 
 class FinLlamaAnalyzer:
     """Simplified FinLlama analyzer that works without complex dependencies"""
-    
+
     def __init__(self, api_key):
         self.api_key = api_key
         self.base_url = "https://finnhub.io/api/v1"
         self.finbert_available = False
-        
+        self.ner_available = False
+
         # Try to load FinBERT (optional)
         try:
             from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
             self.finbert_tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
             self.finbert_model = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert")
-            self.finbert_pipeline = pipeline("sentiment-analysis", 
-                                           model=self.finbert_model, 
+            self.finbert_pipeline = pipeline("sentiment-analysis",
+                                           model=self.finbert_model,
                                            tokenizer=self.finbert_tokenizer)
             self.finbert_available = True
             st.success("✅ FinBERT loaded successfully")
         except Exception as e:
-            st.info(f"ℹ️ FinBERT not available, using enhanced TextBlob: {str(e)}")
+            import traceback
+            error_msg = f"FinBERT not available, using enhanced TextBlob: {str(e)}"
+            st.info(f"ℹ️ {error_msg}")
+            # Print to console for debugging (avoid Unicode issues)
+            print(f"\n[FINBERT LOADING ERROR] {error_msg}")
+            print("Full traceback:")
+            traceback.print_exc()
             self.finbert_pipeline = None
-        
+            self.finbert_available = False
+
+        # Try to load NER processor (optional)
+        try:
+            from ner_processor import get_ner_processor
+            self.ner_processor = get_ner_processor()
+            self.ner_available = True
+            st.success("✅ NER Entity Recognition loaded")
+        except Exception as e:
+            st.info(f"ℹ️ NER not available: {str(e)}")
+            self.ner_processor = None
+
+        # Try to load LightGBM Meta-Learner (optional but recommended)
+        self.use_meta_learner = False
+        try:
+            from lightgbm_meta_learner import LightGBMMetaLearner
+            self.meta_learner = LightGBMMetaLearner()
+            self.meta_learner.load()
+            self.use_meta_learner = True
+            st.success(f"✅ LightGBM Meta-Learner loaded | Accuracy: {self.meta_learner.metrics.get('val_accuracy', 0):.1%}")
+        except Exception as e:
+            st.info(f"ℹ️ Using weighted average (LightGBM not available)")
+            self.meta_learner = None
+
+        # Try to load Confidence Learner (optional but recommended)
+        self.use_confidence_learner = False
+        try:
+            from confidence_learner import ConfidenceLearner
+            self.confidence_learner = ConfidenceLearner()
+            self.confidence_learner.load('confidence_model.pkl')
+            self.use_confidence_learner = True
+            st.success(f"✅ Confidence Learner loaded | R²: {self.confidence_learner.metrics.get('val_r2', 0):.1%}")
+        except Exception as e:
+            st.info(f"ℹ️ Using heuristic confidence (Learner not available)")
+            self.confidence_learner = None
+
         self.setup_knowledge_base()
     
     def setup_knowledge_base(self):
@@ -114,6 +169,88 @@ class FinLlamaAnalyzer:
             'volatile': ['volatile', 'uncertainty', 'turbulent', 'unstable']
         }
     
+    def calculate_enhanced_confidence(self, component_scores, textblob_subjectivity,
+                                      finbert_confidence, finbert_available, has_entities):
+        """
+        Calculate enhanced confidence score with disagreement penalty and reliability weighting.
+
+        Args:
+            component_scores: Dictionary of all component sentiment scores
+            textblob_subjectivity: Subjectivity score from TextBlob (0-1)
+            finbert_confidence: Confidence score from FinBERT (0-1)
+            finbert_available: Boolean indicating if FinBERT is available
+            has_entities: Boolean indicating if financial entities were detected
+
+        Returns:
+            Enhanced confidence score (0-1)
+        """
+        # Component reliabilities based on typical performance
+        # Higher weight = more reliable component
+        reliability_weights = {
+            'finbert': 0.35,     # Highest - deep learning, domain-specific
+            'keywords': 0.20,    # High - financial domain knowledge
+            'regime': 0.15,      # Medium - market context awareness
+            'summary': 0.12,     # Medium - focused analysis
+            'textblob': 0.10,    # Lower - general purpose lexicon
+            'temporal': 0.08     # Lowest - simple time-based rules
+        }
+
+        # Calculate base confidence as weighted average of component strengths
+        base_confidence = 0.0
+        for component, score in component_scores.items():
+            if component in reliability_weights:
+                # Use absolute value as strength indicator
+                strength = min(abs(score), 1.0)
+                base_confidence += strength * reliability_weights[component]
+
+        # Add TextBlob objectivity (inverse of subjectivity) with small weight
+        base_confidence += (1 - textblob_subjectivity) * 0.05
+
+        # Add FinBERT confidence directly if available
+        if finbert_available and finbert_confidence > 0:
+            base_confidence += finbert_confidence * 0.10
+
+        # Normalize base confidence to 0-1 range
+        base_confidence = min(base_confidence, 1.0)
+
+        # Calculate disagreement penalty
+        component_values = [score for score in component_scores.values()]
+        disagreement = np.std(component_values)
+        # High variance (disagreement) reduces confidence, capped at 30% reduction
+        disagreement_penalty = min(disagreement * 0.5, 0.3)
+
+        # Calculate agreement bonus
+        # If all components have same sentiment direction, boost confidence
+        positive_count = sum(1 for x in component_values if x > 0.1)
+        negative_count = sum(1 for x in component_values if x < -0.1)
+        total_count = len(component_values)
+
+        # Strong agreement: 80%+ components agree
+        if positive_count >= 0.8 * total_count or negative_count >= 0.8 * total_count:
+            agreement_bonus = 0.15
+        # Moderate agreement: 70%+ components agree
+        elif positive_count >= 0.7 * total_count or negative_count >= 0.7 * total_count:
+            agreement_bonus = 0.10
+        else:
+            agreement_bonus = 0.0
+
+        # FinBERT availability bonus (higher quality analysis)
+        finbert_bonus = 0.05 if finbert_available else 0.0
+
+        # Entity presence bonus (financial data detected via NER)
+        entity_bonus = 0.05 if has_entities else 0.0
+
+        # Combine all factors
+        enhanced_confidence = (
+            base_confidence * (1 - disagreement_penalty) +
+            agreement_bonus +
+            finbert_bonus +
+            entity_bonus
+        )
+
+        # Clip to valid range
+        return np.clip(enhanced_confidence, 0.0, 1.0)
+
     def finllama_ensemble_analysis(self, text):
         """FinLlama ensemble sentiment analysis"""
         if not text:
@@ -154,56 +291,110 @@ class FinLlamaAnalyzer:
         # Method 6: Temporal Context
         temporal_score = self._temporal_analysis(text)
         
-        # Ensemble weighting
-        if self.finbert_available:
-            weights = {'textblob': 0.12, 'finbert': 0.28, 'keywords': 0.25, 
-                      'regime': 0.15, 'summary': 0.12, 'temporal': 0.08}
+        # Store component scores
+        component_scores = {
+            'textblob': textblob_score,
+            'finbert': finbert_score,
+            'keywords': keyword_score,
+            'regime': regime_score,
+            'summary': summary_score,
+            'temporal': temporal_score
+        }
+
+        # Detect if financial entities are present (for enhanced confidence)
+        has_entities = False
+        if self.ner_available:
+            try:
+                entities = self.ner_processor.extract_entities(text)
+                has_entities = bool(entities.get('money') or entities.get('percentages'))
+            except:
+                has_entities = False
+
+        # Calculate confidence score - use learned model if available, otherwise heuristic
+        if self.use_confidence_learner and self.confidence_learner:
+            try:
+                confidence = self.confidence_learner.predict_confidence(
+                    component_scores=component_scores,
+                    textblob_subjectivity=textblob_subjectivity,
+                    finbert_confidence=finbert_confidence,
+                    finbert_available=self.finbert_available,
+                    has_entities=has_entities
+                )
+            except:
+                # Fallback to heuristic if learned model fails
+                confidence = self.calculate_enhanced_confidence(
+                    component_scores=component_scores,
+                    textblob_subjectivity=textblob_subjectivity,
+                    finbert_confidence=finbert_confidence,
+                    finbert_available=self.finbert_available,
+                    has_entities=has_entities
+                )
         else:
-            weights = {'textblob': 0.25, 'finbert': 0.0, 'keywords': 0.35, 
-                      'regime': 0.20, 'summary': 0.15, 'temporal': 0.05}
-        
-        ensemble_score = (
-            textblob_score * weights['textblob'] +
-            finbert_score * weights['finbert'] +
-            keyword_score * weights['keywords'] +
-            regime_score * weights['regime'] +
-            summary_score * weights['summary'] +
-            temporal_score * weights['temporal']
-        )
-        
-        confidence = np.mean([
-            1 - textblob_subjectivity,
-            finbert_confidence,
-            min(abs(keyword_score), 1.0),
-            min(abs(regime_score), 1.0)
-        ])
-        
+            # Use heuristic confidence
+            confidence = self.calculate_enhanced_confidence(
+                component_scores=component_scores,
+                textblob_subjectivity=textblob_subjectivity,
+                finbert_confidence=finbert_confidence,
+                finbert_available=self.finbert_available,
+                has_entities=has_entities
+            )
+
+        # Ensemble prediction - use LightGBM if available, otherwise weighted average
+        if self.use_meta_learner and self.meta_learner:
+            try:
+                # Use LightGBM meta-learner for enhanced prediction
+                ensemble_score = self.meta_learner.predict(component_scores)
+                method = 'FinLlama Enhanced (LightGBM Meta-Learner)'
+            except:
+                # Fallback to weighted average
+                ensemble_score = self._weighted_average(component_scores)
+                method = 'FinLlama Ensemble (Weighted Average)'
+        else:
+            # Use traditional weighted average
+            ensemble_score = self._weighted_average(component_scores)
+            method = 'FinLlama Ensemble (Weighted Average)'
+
         return {
             'ensemble_score': np.clip(ensemble_score, -1, 1),
             'confidence': confidence,
-            'components': {
-                'textblob': textblob_score,
-                'finbert': finbert_score,
-                'keywords': keyword_score,
-                'regime': regime_score,
-                'summary': summary_score,
-                'temporal': temporal_score
-            },
-            'method': 'FinLlama Ensemble'
+            'components': component_scores,
+            'method': method
         }
+
+    def _weighted_average(self, component_scores):
+        """Calculate weighted average of component scores"""
+        if self.finbert_available:
+            weights = {'textblob': 0.12, 'finbert': 0.28, 'keywords': 0.25,
+                      'regime': 0.15, 'summary': 0.12, 'temporal': 0.08}
+        else:
+            weights = {'textblob': 0.25, 'finbert': 0.0, 'keywords': 0.35,
+                      'regime': 0.20, 'summary': 0.15, 'temporal': 0.05}
+
+        ensemble_score = sum(component_scores[k] * weights[k] for k in component_scores)
+        return ensemble_score
     
     def _analyze_keywords(self, text):
-        """Financial keyword analysis"""
+        """Financial keyword analysis with NER enhancement"""
         text_lower = text.lower()
-        
-        positive_count = sum(1 for word in self.financial_keywords['positive'] 
+
+        positive_count = sum(1 for word in self.financial_keywords['positive']
                            if word in text_lower)
-        negative_count = sum(1 for word in self.financial_keywords['negative'] 
+        negative_count = sum(1 for word in self.financial_keywords['negative']
                            if word in text_lower)
-        
+
+        # Boost score if NER detects financial entities
+        if self.ner_available:
+            try:
+                entities = self.ner_processor.extract_entities(text)
+                # Boost if financial data present (money, percentages)
+                if entities.get('money') or entities.get('percentages'):
+                    positive_count += 0.5  # Small boost for data-backed sentiment
+            except:
+                pass  # Graceful degradation
+
         positive_score = np.tanh(positive_count * 0.2)
         negative_score = np.tanh(negative_count * 0.2)
-        
+
         return positive_score - negative_score
     
     def _analyze_market_regime(self, text):
@@ -287,10 +478,23 @@ class FinLlamaAnalyzer:
         }
     
     def fetch_company_news(self, symbol, days_back=7):
-        """Fetch news from Finnhub API"""
+        """Fetch news from multiple sources (Finnhub + NewsAPI + Polygon)"""
+        try:
+            # Try to use multi-source aggregator for better coverage
+            from multi_source_news import MultiSourceNewsAggregator
+            aggregator = MultiSourceNewsAggregator()
+            articles = aggregator.fetch_all_sources(symbol, days_back)
+            return articles
+        except Exception as e:
+            # Fallback to Finnhub only
+            st.info(f"Using Finnhub only (multi-source unavailable): {str(e)}")
+            return self._fetch_finnhub_only(symbol, days_back)
+
+    def _fetch_finnhub_only(self, symbol, days_back):
+        """Fallback: Fetch from Finnhub API only"""
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days_back)
-        
+
         url = f"{self.base_url}/company-news"
         params = {
             'symbol': symbol,
@@ -298,9 +502,9 @@ class FinLlamaAnalyzer:
             'to': end_date.strftime('%Y-%m-%d'),
             'token': self.api_key
         }
-        
+
         try:
-            response = requests.get(url, params=params)
+            response = requests.get(url, params=params, timeout=10)
             if response.status_code == 200:
                 return response.json()
             else:
@@ -957,89 +1161,7 @@ def display_results(results):
                         )
                         
                         st.plotly_chart(fig_corr, use_container_width=True, key="correlation_matrix_chart")
-    
-    # Company Rankings (existing code continues...)
-    st.markdown("## Company Sentiment Rankings")
-    
-    ranking_data = []
-    
-    for symbol, data in companies.items():
-        stats = data.get('sentiment_stats', {})
-        trend_analysis = stats.get('trend_analysis', {})
-        
-        ranking_data.append({
-            'Company': symbol,
-            'FinLlama Score': stats.get('avg_sentiment', 0),
-            'Confidence': stats.get('avg_confidence', 0),
-            'Articles': data.get('articles_count', 0),
-            'Volatility': stats.get('sentiment_volatility', 0),
-            'Trend': trend_analysis.get('trend_direction', 'unknown'),
-            'Momentum': trend_analysis.get('momentum', 0)
-        })
-    
-    if ranking_data:
-        ranking_df = pd.DataFrame(ranking_data).sort_values('FinLlama Score', ascending=True)
-        
-        # Enhanced bar chart with trend information
-        fig = px.bar(
-            ranking_df,
-            x='FinLlama Score',
-            y='Company',
-            orientation='h',
-            color='Momentum',
-            color_continuous_scale='RdYlGn',
-            title="FinLlama Company Rankings with Momentum",
-            hover_data=['Confidence', 'Trend', 'Articles', 'Volatility']
-        )
-        st.plotly_chart(fig, use_container_width=True, key="company_rankings_momentum_chart")
-        
-        # Enhanced data table
-        st.dataframe(ranking_df, use_container_width=True)
-    
-    # Component analysis (existing code continues...)
-    st.markdown("## Component Analysis")
 
-    if companies:
-        sample_company = list(companies.keys())[0]
-        sample_articles = companies[sample_company]['articles'][:5]
-
-        if sample_articles:
-            comparison_data = []
-            for i, article in enumerate(sample_articles):
-                components = article['analysis']['components']
-                comparison_data.append({
-                    'Article': f"Article {i+1}",
-                    'TextBlob': components['textblob'],
-                    'FinBERT': components['finbert'],
-                    'Keywords': components['keywords'],
-                    'Regime': components['regime'],
-                    'Summary': components['summary'],
-                    'Temporal': components['temporal'],
-                    'Ensemble': article['analysis']['ensemble_score']
-                })
-
-            comparison_df = pd.DataFrame(comparison_data)
-
-            fig = go.Figure()
-            methods = ['TextBlob', 'FinBERT', 'Keywords', 'Regime', 'Summary', 'Temporal', 'Ensemble']
-            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#FF6B35']
-
-            for method, color in zip(methods, colors):
-                fig.add_trace(go.Bar(
-                    name=method,
-                    x=comparison_df['Article'],
-                    y=comparison_df[method],
-                    marker_color=color,
-                    opacity=1.0 if method == 'Ensemble' else 0.7
-                ))
-
-            fig.update_layout(
-                title="FinLlama Component Analysis",
-                barmode='group',
-                height=500
-            )
-            st.plotly_chart(fig, use_container_width=True, key="component_analysis_timeseries_chart")
-    
     # Time Series Insights
     if time_series_data:
         st.markdown("## Time Series Insights & Statistics")
@@ -1342,71 +1464,165 @@ Report Type: Academic Research Summary with Time Series Analysis
 
     # Export functionality
     st.markdown("## Export Results")
-    
+
     col1, col2 = st.columns(2)
-    
+
     with col1:
-        if st.button("Export Data"):
-            # Create export data
-            export_data = []
-            for symbol, company_data in companies.items():
-                for article in company_data.get('articles', []):
-                    analysis = article['analysis']
-                    export_data.append({
-                        'symbol': symbol,
-                        'headline': article['headline'],
-                        'datetime': article['datetime'].isoformat(),
-                        'finllama_score': analysis['ensemble_score'],
-                        'confidence': analysis['confidence'],
-                        **{f"{k}_score": v for k, v in analysis['components'].items()}
-                    })
-            
-            if export_data:
-                export_df = pd.DataFrame(export_data)
-                csv = export_df.to_csv(index=False)
-                st.download_button(
-                    "Download CSV",
-                    csv,
-                    f"finllama_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    "text/csv"
-                )
-    
-    with col2:
-        if st.button("Export Report"):
-            report = {
-                'methodology': 'FinLlama Enhanced Sentiment Analysis',
-                'timestamp': results['timestamp'],
-                'portfolio_metrics': portfolio_metrics,
-                'company_rankings': ranking_data
-            }
-            
-            json_report = json.dumps(report, indent=2)
+        # Create export data
+        export_data = []
+        for symbol, company_data in companies.items():
+            for article in company_data.get('articles', []):
+                analysis = article['analysis']
+                export_data.append({
+                    'symbol': symbol,
+                    'headline': article['headline'],
+                    'datetime': article['datetime'].isoformat(),
+                    'finllama_score': analysis['ensemble_score'],
+                    'confidence': analysis['confidence'],
+                    **{f"{k}_score": v for k, v in analysis['components'].items()}
+                })
+
+        if export_data:
+            export_df = pd.DataFrame(export_data)
+            csv = export_df.to_csv(index=False)
             st.download_button(
-                "Download JSON Report",
-                json_report,
-                f"finllama_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                "application/json"
+                "Download CSV Data",
+                csv,
+                f"finllama_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                "text/csv",
+                key="export_csv"
             )
+
+    with col2:
+        report = {
+            'methodology': 'FinLlama Enhanced Sentiment Analysis',
+            'timestamp': results['timestamp'],
+            'portfolio_metrics': portfolio_metrics,
+            'company_rankings': ranking_data
+        }
+
+        # Custom JSON serializer for datetime/date objects
+        def json_serializer(obj):
+            if hasattr(obj, 'isoformat'):
+                return obj.isoformat()
+            raise TypeError(f"Type {type(obj)} not serializable")
+
+        json_report = json.dumps(report, indent=2, default=json_serializer)
+        st.download_button(
+            "Download JSON Report",
+            json_report,
+            f"finllama_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            "application/json",
+            key="export_json"
+        )
+
+    # Performance Metrics Section
+    st.markdown("---")
+    st.markdown("## Model Performance Metrics")
+
+    # Check if meta-learner is available and has metrics
+    if hasattr(st.session_state.analyzer, 'use_meta_learner') and st.session_state.analyzer.use_meta_learner:
+        metrics = st.session_state.analyzer.meta_learner.metrics
+
+        if metrics:
+            st.success("### LightGBM Meta-Learner Performance")
+
+            # Display metrics in columns
+            metric_col1, metric_col2, metric_col3, metric_col4, metric_col5 = st.columns(5)
+
+            with metric_col1:
+                st.metric(
+                    "Accuracy",
+                    f"{metrics.get('val_accuracy', 0):.1%}",
+                    help="Percentage of predictions within ±0.1 tolerance"
+                )
+
+            with metric_col2:
+                st.metric(
+                    "Precision",
+                    f"{metrics.get('val_precision', 0):.3f}",
+                    help="Consistency of predictions (1 - std of residuals / std of true values)"
+                )
+
+            with metric_col3:
+                st.metric(
+                    "MAE",
+                    f"{metrics.get('val_mae', 0):.4f}",
+                    help="Mean Absolute Error"
+                )
+
+            with metric_col4:
+                st.metric(
+                    "RMSE",
+                    f"{metrics.get('val_rmse', 0):.4f}",
+                    help="Root Mean Squared Error"
+                )
+
+            with metric_col5:
+                st.metric(
+                    "R² Score",
+                    f"{metrics.get('val_r2', 0):.4f}",
+                    help="Coefficient of determination"
+                )
+
+            # Feature importance chart
+            if st.session_state.analyzer.meta_learner.feature_importance is not None:
+                st.markdown("### Feature Importance")
+
+                feature_imp = st.session_state.analyzer.meta_learner.feature_importance
+
+                fig = go.Figure(data=[
+                    go.Bar(
+                        x=feature_imp['importance'],
+                        y=feature_imp['feature'],
+                        orientation='h',
+                        marker=dict(
+                            color=feature_imp['importance'],
+                            colorscale='Viridis',
+                            showscale=True
+                        )
+                    )
+                ])
+
+                fig.update_layout(
+                    title="Component Contribution to Final Sentiment",
+                    xaxis_title="Importance Score",
+                    yaxis_title="Component",
+                    height=400
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+
+            # Model info
+            with st.expander("Model Details"):
+                st.write(f"**Training Samples:** {metrics.get('n_train_samples', 0)}")
+                st.write(f"**Validation Samples:** {metrics.get('n_val_samples', 0)}")
+                st.write(f"**Features Used:** {metrics.get('n_features', 0)}")
+                st.write(f"**Trees in Ensemble:** {metrics.get('n_trees', 0)}")
+                st.write(f"**Training MAE:** {metrics.get('train_mae', 0):.4f}")
+                st.write(f"**Training R²:** {metrics.get('train_r2', 0):.4f}")
+    else:
+        st.info("Meta-learner not available. Using weighted average ensemble method.")
 
 def main():
     """Main application function"""
     # Display overview
     display_system_overview()
-    
-    # Sidebar
-    st.sidebar.title("FinLlama Configuration")
-    
-    api_key = st.sidebar.text_input(
-        "Finnhub API Key",
-        type="password",
-        help="Get free API key from https://finnhub.io/"
-    )
-    
-    if not api_key:
-        st.warning("Please enter your Finnhub API key to continue.")
+
+    # Load API key from environment
+    api_key = os.getenv("FINNHUB_API_KEY")
+
+    if not api_key or api_key == "your_api_key_here":
+        st.error("⚠️ API Key Not Configured")
+        st.warning("Please add your Finnhub API key to the .env file:")
+        st.code("FINNHUB_API_KEY=your_actual_api_key", language="bash")
         st.info("Get a free API key from https://finnhub.io/")
         return
-    
+
+    # Sidebar
+    st.sidebar.title("FinLlama Configuration")
+    st.sidebar.success("✅ API Key Loaded")
+
     # Initialize analyzer
     if 'analyzer' not in st.session_state:
         with st.spinner("Initializing FinLlama..."):
@@ -1439,5 +1655,6 @@ def main():
     if hasattr(st.session_state, 'results'):
         display_results(st.session_state.results)
 
-if __name__ == "__main__":
-    main()
+# Call main() directly when loaded by Streamlit
+# (run via run_app.py to ensure PyTorch loads before Streamlit)
+main()
