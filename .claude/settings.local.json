@@ -8,7 +8,11 @@
       "Bash(ping:*)",
       "Bash(nul)",
       "Bash(python:*)",
-      "Bash(dir /b /a \"c:\\Users\\shubh\\Developer\\Paper\\NLP_market_sentiment_analysis\")"
+      "Bash(dir /b /a \"c:\\Users\\shubh\\Developer\\Paper\\NLP_market_sentiment_analysis\")",
+      "Bash(netstat:*)",
+      "Bash(findstr:*)",
+      "Bash(taskkill:*)",
+      "Bash(powershell -Command \"Stop-Process -Id 32092 -Force\")"
     ],
     "deny": [],
     "ask": []
